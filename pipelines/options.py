@@ -15,6 +15,7 @@ def pipeline_options(
         streaming: bool = True,
 ):
     job_name = f"{job_name}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    print(job_name)
 
     # For a list of available options, check:
     # https://cloud.google.com/dataflow/docs/guides/specifying-exec-params#setting-other-cloud-dataflow-pipeline-options
