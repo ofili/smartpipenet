@@ -1,9 +1,12 @@
 import json
 import logging
 import random
+import threading
 import time
 
 from google.cloud import pubsub_v1
+
+from config.config import PROJECT_ID, TOPIC_NAME
 
 
 def generate_sensor_data(sensor_id):
@@ -56,21 +59,33 @@ def generate_sensor_ids(num_plants, sensors_per_plant):
 
 def publish_data(data):
     # Define Pub/Sub topic and create a Pub/Sub publisher client
-    project_id = "my-project"
-    topic_name = "smartpipenet-sensor-data"
+    project_id = PROJECT_ID
+    topic_name = TOPIC_NAME
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(project_id, topic_name)
     publisher.publish(topic_path, data=data.encode('utf-8'))
 
 
+def emit_sensor_data(sensor_id):
+    """Emits data for a given sensor ID"""
+    while True:
+        sensor_data = generate_sensor_data(sensor_id)
+        logging.info(sensor_data)
+        publish_data(sensor_data)
+        time.sleep(0.2)
+
+
 if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)
-    while True:
-        for id in generate_sensor_ids(2, 10):
-            sensor_data = generate_sensor_data(id)
-            print(sensor_data)
+    sensor_ids = generate_sensor_ids(10, 150)
 
-            # Publish the sensor data to Pub/Sub topic
-            publish_data(sensor_data)
+    # Create threads for emitting data from each sensor concurrently
+    threads = []
+    for sensor_id in sensor_ids:
+        thread = threading.Thread(target=emit_sensor_data, args=(sensor_id,))
+        threads.append(thread)
+        thread.start()
 
-        time.sleep(0.2)  # Wait for 0.2 seconds
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
