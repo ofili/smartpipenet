@@ -1,10 +1,15 @@
 import json
 import logging
+from pathlib import Path
 import random
+import sys
 import threading
 import time
 
 from google.cloud import pubsub_v1
+
+path_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(path_root))
 
 from config.config import PROJECT_ID, TOPIC_NAME
 
@@ -18,7 +23,6 @@ def generate_sensor_data(sensor_id):
     exhaust_flow_rate = round(random.uniform(1, 10), 2)  # m3/h
     fuel_flow_rate = round(random.uniform(0.1, 0.7), 2)  # m3/h
     energy_output = round(random.uniform(1000, 5005), 2)  # kW
-    efficiency = round(energy_output / fuel_flow_rate, 2)  # percentage
     carbon_monoxide = round(random.uniform(0, 55), 2)  # ppm
     nitrogen_oxide = round(random.uniform(0, 110), 2)  # ppm
     oxygen = round(random.uniform(3, 15), 2)  # ppm
@@ -37,7 +41,6 @@ def generate_sensor_data(sensor_id):
         "exhaust_flow_rate": exhaust_flow_rate,
         "fuel_flow_rate": fuel_flow_rate,
         "energy_output": energy_output,
-        "efficiency": efficiency,
         "carbon_monoxide": carbon_monoxide,
         "nitrogen_oxide": nitrogen_oxide,
         "oxygen": oxygen,
@@ -66,12 +69,12 @@ def publish_data(data):
     publisher.publish(topic_path, data=data.encode('utf-8'))
 
 
-def emit_sensor_data(sensor_id):
-    """Emits data for a given sensor ID"""
+def publish_sensor_data(sensor_id):
+    """Publish data for a given sensor ID"""
     while True:
         sensor_data = generate_sensor_data(sensor_id)
-        logging.info(sensor_data)
         publish_data(sensor_data)
+        logging.info(f"Published {sensor_data}")
         time.sleep(0.2)
 
 
@@ -82,7 +85,7 @@ if __name__ == '__main__':
     # Create threads for emitting data from each sensor concurrently
     threads = []
     for sensor_id in sensor_ids:
-        thread = threading.Thread(target=emit_sensor_data, args=(sensor_id,))
+        thread = threading.Thread(target=publish_sensor_data, args=(sensor_id,))
         threads.append(thread)
         thread.start()
 
