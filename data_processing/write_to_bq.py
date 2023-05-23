@@ -1,11 +1,15 @@
 import argparse
 import logging
 import sys
+from abc import ABC
 from pathlib import Path
+from typing import Dict, Any
 
 import apache_beam as beam
-from google.cloud import firestore
+from apache_beam.io.gcp.internal.clients import bigquery
 from google.cloud import bigquery
+from google.cloud import firestore
+from google.cloud.bigquery import SchemaField
 
 path_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(path_root))
@@ -21,7 +25,83 @@ collection_name = FIRESTORE_COLLECTION_NAME
 dataset_id = DATASET_ID
 table_id = TABLE_ID
 
-bq_schema = 'sensor_id:STRING, timestamp:TIMESTAMP, ambient_temperature:FLOAT,exhaust_temperature:FLOAT,inlet_pressure:FLOAT,outlet_pressure:FLOAT,coolant_flow_rate:FLOAT,exhaust_flow_rate:FLOAT,fuel_flow_rate:FLOAT,energy_output:FLOAT,efficiency:FLOAT,carbon_monoxide:FLOAT,nitrogen_oxide:FLOAT,oxygen:FLOAT,carbon_dioxide:FLOAT,water_vapor:FLOAT'
+
+# Define BigQuery schema
+schema: list[SchemaField] = [
+    bigquery.SchemaField("sensor_id", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="NULLABLE"),
+    bigquery.SchemaField("ambient_temperature", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("exhaust_temperature", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("inlet_pressure", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("outlet_pressure", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("coolant_flow_rate", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("exhaust_flow_rate", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("fuel_flow_rate", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("energy_output", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("efficiency", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("combustion_efficiency", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("carbon_monoxide", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("nitrogen_oxide", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("oxygen", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("carbon_dioxide", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("water_vapor", "FLOAT", mode="NULLABLE"),
+    bigquery.TimePartitioning(
+        type_=bigquery.TimePartitioningType.MONTH,
+        field="timestamp"
+    ),
+]
+
+
+class RemoveOutliersFn(beam.DoFn, ABC):
+    def process(self, element, *args, **kwargs):
+        min_values = {
+            'ambient_temperature': 20,
+            'exhaust_temperature': 150,
+            'inlet_pressure': 0.5,
+            'outlet_pressure': 0.5,
+            'coolant_flow_rate': 0.5,
+            'exhaust_flow_rate': 5,
+            'fuel_flow_rate': 0.1,
+            'energy_output': 1000,
+            'carbon_monoxide': 0,
+            'nitrogen_oxide': 0,
+            'oxygen': 5,
+            'carbon_dioxide': 5,
+            'water_vapor': 0,
+        }
+
+        max_values = {
+            'ambient_temperature': 30,
+            'exhaust_temperature': 300,
+            'inlet_pressure': 15,
+            'outlet_pressure': 1.5,
+            'coolant_flow_rate': 15,
+            'exhaust_flow_rate': 10,
+            'fuel_flow_rate': 0.5,
+            'energy_output': 5000,
+            'carbon_monoxide': 50,
+            'nitrogen_oxide': 100,
+            'oxygen': 15,
+            'carbon_dioxide': 50,
+            'water_vapor': 100,
+        }
+
+        processed_data: dict[Any, Any] = {}
+        for field, value in element.items():
+            if min_values.get(field, float('-inf')) <= value <= max_values.get(field, float('-inf')):
+                processed_data[field] = value
+        
+        yield processed_data
+
+
+def process_sensor_data(doc):
+    sensor_data = doc.to_dict()
+    return [sensor_data]  # Wrap the  sensor data as a list to emit a single element to the DoFn
+
+
+def write_to_bigquery(data):
+    row = bigquery.Row(**data)
+    return row
 
 
 def run(argv=None):
@@ -33,28 +113,37 @@ def run(argv=None):
 
     with beam.Pipeline(
             options=pipeline_options(project=PROJECT_ID, job_name=known_args.job_name, mode=known_args.mode)) as p:
+        
+        # Read data from Firestore
         db = firestore.Client(project=firestore_project_id)
         collection_ref = db.collection(collection_name)
 
         # Read data
         sensor_data = (
-                p
-                | 'Read sensor data from Firestore' >> beam.Create(collection_ref.get())
-                | 'Extract data' >> beam.Map(lambda doc: doc.to_dict())
+            p
+            | 'Read sensor data from Firestore' >> beam.Create(collection_ref.get())
+            | 'Extract data' >> beam.Map(process_sensor_data)
+            | 'Remove outliers' >> beam.ParDo(RemoveOutliersFn())
+            | 'Wrap data for write' >> beam.Map(lambda data: (data,))
         )
-
-        # Process data
-        processed_data = sensor_data | 'Process sensor data' >> beam.Map(process_data)
-
-        # Write to BigQuery
-        bq_data = processed_data | 'Convert to BigQuery Row' >> beam.Map(lambda data: bigquery.Row(**data))
-        bq_data | 'Write to BigQuery' >> beam.io.WriteToBigQuery(
+        # Write data to BigQuery
+        sensor_data | 'Write to BigQuery' >> beam.io.WriteToBigQuery(
             project=project_id,
             dataset=dataset_id,
             table=table_id,
-            schema=bq_schema,
+            schema=schema,
+            write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND,
             create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
-            write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND
+            method='STREAMING_INSERTS',
+            additional_bq_parameters={
+                'timePartitioning': {
+                    'type': 'MONTH',
+                    'field': 'timestamp',
+                },
+                'clustering': {
+                    'fields': ['sensor_id'],
+                }
+            }
         )
 
 
