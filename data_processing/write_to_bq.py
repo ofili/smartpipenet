@@ -3,10 +3,9 @@ import logging
 import sys
 from abc import ABC
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 import apache_beam as beam
-from apache_beam.io.gcp.internal.clients import bigquery
 from google.cloud import bigquery
 from google.cloud import firestore
 from google.cloud.bigquery import SchemaField
@@ -24,7 +23,6 @@ firestore_project_id = FIRESTORE_PROJECT_ID
 collection_name = FIRESTORE_COLLECTION_NAME
 dataset_id = DATASET_ID
 table_id = TABLE_ID
-
 
 # Define BigQuery schema
 schema: list[SchemaField] = [
@@ -90,7 +88,7 @@ class RemoveOutliersFn(beam.DoFn, ABC):
         for field, value in element.items():
             if min_values.get(field, float('-inf')) <= value <= max_values.get(field, float('-inf')):
                 processed_data[field] = value
-        
+
         yield processed_data
 
 
@@ -99,35 +97,35 @@ def process_sensor_data(doc):
     return [sensor_data]  # Wrap the  sensor data as a list to emit a single element to the DoFn
 
 
-def write_to_bigquery(data):
-    row = bigquery.Row(**data)
-    return row
+def read_sensor_data(pipeline):
+    db = firestore.Client(project=firestore_project_id)
+    collection_ref = db.collection(collection_name)
 
-
-def run(argv=None):
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--mode', dest='mode', choices=["local", "cloud"], help='Mode to run the pipelines in.')
-    parser.add_argument('--job_name', dest='job_name', help='Name of the job.')
-
-    known_args, pipeline_args = parser.parse_known_args(argv)
-
-    with beam.Pipeline(
-            options=pipeline_options(project=PROJECT_ID, job_name=known_args.job_name, mode=known_args.mode)) as p:
-        
-        # Read data from Firestore
-        db = firestore.Client(project=firestore_project_id)
-        collection_ref = db.collection(collection_name)
-
-        # Read data
-        sensor_data = (
-            p
+    return (
+            pipeline
             | 'Read sensor data from Firestore' >> beam.Create(collection_ref.get())
             | 'Extract data' >> beam.Map(process_sensor_data)
+    )
+
+
+def remove_outliers(data):
+    return (
+            data
             | 'Remove outliers' >> beam.ParDo(RemoveOutliersFn())
+    )
+
+
+def prepare_data_for_bigquery(data):
+    return (
+            data
             | 'Wrap data for write' >> beam.Map(lambda data: (data,))
-        )
-        # Write data to BigQuery
-        sensor_data | 'Write to BigQuery' >> beam.io.WriteToBigQuery(
+    )
+
+
+def write_to_bigquery(data):
+    return (
+        data
+        | 'Write to BigQuery' >> beam.io.WriteToBigQuery(
             project=project_id,
             dataset=dataset_id,
             table=table_id,
@@ -145,6 +143,23 @@ def run(argv=None):
                 }
             }
         )
+    )
+
+
+def run(argv=None):
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--mode', dest='mode', choices=["local", "cloud"], help='Mode to run the pipelines in.')
+    parser.add_argument('--job_name', dest='job_name', help='Name of the job.')
+
+    known_args, pipeline_args = parser.parse_known_args(argv)
+
+    with beam.Pipeline(
+            options=pipeline_options(project=PROJECT_ID, job_name=known_args.job_name, mode=known_args.mode)) as p:
+        # Read data
+        sensor_data = read_sensor_data(p)
+        processed_data = remove_outliers(sensor_data)
+        prepared_data = prepare_data_for_bigquery(processed_data)
+        write_to_bigquery(prepared_data)
 
 
 if __name__ == '__main__':
