@@ -2,7 +2,7 @@ import logging
 import json
 
 from google.cloud import firestore
-from google.cloud.firestore_v1 import DocumentSnapshot
+from google.cloud.firestore_v1 import DocumentSnapshot, WriteBatch, DocumentReference
 
 
 def compute_fields(sensor_data):
@@ -67,10 +67,10 @@ def write_sensor_data(event, context):
     # Write sensor data to Firestore
     try:
         db = firestore.Client()
-        batch = db.batch()
+        batch: WriteBatch = db.batch()
 
         # Set sensor data document
-        sensor_data_ref = db.collection('smartpipenet-pp-sensor').document()
+        sensor_data_ref: DocumentReference = db.collection('smartpipenet-pp-sensor').document()
         batch.set(sensor_data_ref, sensor_data_computed_fields)
 
         # Mark the message as processed
