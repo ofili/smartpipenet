@@ -1,13 +1,13 @@
 from __future__ import absolute_import
 
 import argparse
-import datetime
+import json
 import logging
+from datetime import datetime
 
 import apache_beam as beam
+import pandas as pd
 import pyarrow as pa
-from apache_beam import PCollection
-from apache_beam.dataframe.convert import to_dataframe
 from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.transforms.window import TimestampedValue, FixedWindows
 
@@ -24,9 +24,9 @@ def calculate_fuel_flow_ratio(element):
     }
 
 
-def is_valid_date(date):
-    parsed = datetime.datetime.strptime(date, '%Y-%m-%d')
-    return datetime.datetime(2023, 1, 1) <= parsed <= datetime.datetime(2023, 12, 31)
+def is_valid_date(date: str):
+    parsed = datetime.strptime(date, '%Y-%m-%d')
+    return datetime(2023, 1, 1) <= parsed <= datetime(2023, 12, 31)
 
 
 def run_power_plant_efficiency_pipeline(
@@ -46,20 +46,22 @@ def run_power_plant_efficiency_pipeline(
     # The pipeline will be run on exiting the `with` block
     with pipeline as p:
         table = (
-            p
-            | 'Read table' >> beam.io.ReadFromBigQuery(
-                query=query, use_standard_sql=True)
-            | 'Assign timestamp' >> beam.Map(lambda x: TimestampedValue(x, x['date'].timestamp()))
-            # Use beam.Select to make sure data has a schema
-            | 'Set schema' >> beam.Select(
-                date=lambda x: str(x['date']),
-                oxygen=lambda x: float(x['oxygen']),
-                nitrogen_oxide=lambda x: float(x['nitrogen_oxide']),
-                fuel_flow_rate=lambda x: float(x['fuel_flow_rate'])
-            )
+                p
+                # | 'Read table' >> beam.io.ReadFromBigQuery(query=query, use_standard_sql=True)
+                | 'Read' >> beam.io.WriteToText('sensor_data.json')
+                | 'Parse' >> beam.Map(lambda data: json.loads(data))
+                | 'Print' >> beam.Map(print)
+                | 'Assign timestamp' >> beam.Map(lambda x: TimestampedValue(x, x['date'].timestamp()))
+                # Use beam.Select to make sure data has a schema
+                | 'Set schema' >> beam.Select(
+                    date=lambda x: str(x['date']),
+                    oxygen=lambda x: float(x['oxygen']),
+                    nitrogen_oxide=lambda x: float(x['nitrogen_oxide']),
+                    fuel_flow_rate=lambda x: float(x['fuel_flow_rate'])
+                )
         )
 
-        daily_reading: PCollection = table | 'Daily windows' >> beam.WindowInto(
+        daily_reading = table | 'Daily windows' >> beam.WindowInto(
             FixedWindows(60 * 60 * 24)
         )
 
@@ -69,22 +71,26 @@ def run_power_plant_efficiency_pipeline(
         # Calculate fuel flow ratio for each sensor ID
         fuel_flow_ratios = grouped_data | 'Calculate fuel flow ratio' >> beam.Map(calculate_fuel_flow_ratio)
 
-        # Convert the result to a DataFrame
-        df = fuel_flow_ratios | 'Convert to DataFrame' >> beam.Map(lambda x: (x['sensor_id'], x['fuel_flow_ratio']))
-        # df = to_dataframe(df)
+        # Convert the result to a PCollection of dictionaries
+        results = fuel_flow_ratios | 'Convert to PCollection' >> beam.Map(lambda x: pa.RecordBatch.from_pandas(pd.DataFrame([x])))
+        # df = DeferredFrame(df)
 
-        # Write the DataFrame to CSV file
-        df | 'Write out' >> beam.io.WriteToParquet(output, schema=pa.schema([
-            ('sensor_id', pa.string()),
-            ('some_string', pa.decimal128(2))
-        ]))
+        # Write the result to Parquet file
+        results | 'Write out' >> beam.io.WriteToParquet(
+            output, schema=pa.schema([
+                pa.field('sensor_id', pa.string()),
+                pa.field('some_string', pa.float64())
+            ])
+        )
 
 
 def run(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--start_date')
-    parser.add_argument('--end_date')
-    parser.add_argument('--output')
+    parser.add_argument('--start_date', dest='start_date', type=is_valid_date,
+                        help='YYYY-MM_DD lower bound (inclusive) for input dataset.')
+    parser.add_argument('--end_date', dest='end_date', type=is_valid_date,
+                        help='YYYY-MM-DD upper bound (inclusive) for input dataset.')
+    parser.add_argument('--output', dest='output', required=True, help='Location to write the output.')
 
     known_args, pipeline_args = parser.parse_known_args(argv)
 
